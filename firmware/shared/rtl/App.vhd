@@ -56,8 +56,9 @@ architecture mapping of App is
    constant MEM_INDEX_C      : natural := 1;
    constant PRBS_INDEX_C     : natural := 2;
    constant RDMA_MON_INDEX_C : natural := 3;
+   constant FEB_INDEX_C      : natural := 4;
 
-   constant NUM_AXIL_MASTERS_C : positive := 4;
+   constant NUM_AXIL_MASTERS_C : positive := 5;
 
    constant XBAR_CONFIG_C : AxiLiteCrossbarMasterConfigArray(NUM_AXIL_MASTERS_C-1 downto 0) := genAxiLiteConfig(NUM_AXIL_MASTERS_C, x"8000_0000", 20, 16);
 
@@ -68,6 +69,10 @@ architecture mapping of App is
 
    signal prbsAxisMaster : AxiStreamMasterType;
    signal prbsAxisSlave  : AxiStreamSlaveType;
+   signal pktAxisMaster  : AxiStreamMasterType;
+   signal pktAxisSlave   : AxiStreamSlaveType;
+   signal febAxisMaster  : AxiStreamMasterType;
+   signal febAxisSlave   : AxiStreamSlaveType;
 
 begin
 
@@ -204,8 +209,44 @@ begin
             axisRst     => axilRst,
             sAxisMaster => prbsAxisMaster,
             sAxisSlave  => prbsAxisSlave,
-            mAxisMaster => rdmaMaster,
-            mAxisSlave  => rdmaSlave);
+            mAxisMaster => pktAxisMaster,
+            mAxisSlave  => pktAxisSlave);
+
+      --------------------------------
+      -- AdvCam FEB packet source (FEB ICD format, see FebPacketGen.vhd)
+      --------------------------------
+      U_FebPacketGen : entity work.FebPacketGen
+         generic map (
+            TPD_G         => TPD_G,
+            AXIS_CONFIG_G => RDMA_AXIS_CONFIG_C)
+         port map (
+            axilClk         => axilClk,
+            axilRst         => axilRst,
+            txMaster        => febAxisMaster,
+            txSlave         => febAxisSlave,
+            axilReadMaster  => axilReadMasters(FEB_INDEX_C),
+            axilReadSlave   => axilReadSlaves(FEB_INDEX_C),
+            axilWriteMaster => axilWriteMasters(FEB_INDEX_C),
+            axilWriteSlave  => axilWriteSlaves(FEB_INDEX_C));
+
+      --------------------------------
+      -- Either source into the RDMA engine: enable one at a time. The mux only switches
+      -- between frames, and the engine ignores tDest.
+      --------------------------------
+      U_RdmaMux : entity surf.AxiStreamMux
+         generic map (
+            TPD_G         => TPD_G,
+            NUM_SLAVES_G  => 2,
+            PIPE_STAGES_G => 1)
+         port map (
+            axisClk         => axilClk,
+            axisRst         => axilRst,
+            sAxisMasters(0) => pktAxisMaster,
+            sAxisMasters(1) => febAxisMaster,
+            sAxisSlaves(0)  => pktAxisSlave,
+            sAxisSlaves(1)  => febAxisSlave,
+            mAxisMaster     => rdmaMaster,
+            mAxisSlave      => rdmaSlave);
 
    end generate GEN_ROCEV2_APP_LOGIC;
 

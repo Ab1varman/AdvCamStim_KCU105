@@ -14,6 +14,8 @@ import surf.axi           as axi
 import pyrogue  as pr
 import simple_10gbe_rudp_kcu105_example as baseBoard
 
+from rocev2_10gbe_rudp_kcu105_example._FebPacketGen import FebPacketGen
+
 # class App(baseBoard.App):
 class App(pr.Device):
     def __init__( self, **kwargs):
@@ -30,4 +32,9 @@ class App(pr.Device):
             offset      = 0x0003_0000,
             numberLanes = 1,
             expand      = True,
+        ))
+
+        self.add(FebPacketGen(
+            offset     = 0x0004_0000,
+            expand     = True,
         ))
