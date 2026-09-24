@@ -3,17 +3,33 @@
 -------------------------------------------------------------------------------
 -- Description: AdvCam FEB packet generator
 --
--- Emits one FEB data packet per trigger, in the layout of the proposed AdvCam
--- FEB ICD (no-neighbours scenario, format version 1). Multi-byte fields are
--- big-endian:
+-- Emits one FEB data packet per trigger, in the layout of the AdvCam FEB ICD v0.3
+-- (no-neighbours scenario, format version 1). Multi-byte fields are big-endian:
 --
---   bytes  0-7   tel_id, board_id, packet_type (0x01), trigger_type,
---                event_type, num_samples, format_version (0x01), reserved
---   bytes  8-15  event time: TAI seconds, then quarter-nanoseconds
---   bytes 16-23  pixel_status_feb
---   bytes 24-    49 x num_samples 12-bit samples, channel-major, packed MSB
---                first, zero-padded to a multiple of 32 bits
---   last 4       CRC-32 (IEEE 802.3, as zlib) of every byte before it
+--   byte    0     format_version (0x01)
+--   byte    1     tel_id
+--   byte    2     board_id
+--   byte    3     trigger_type
+--   byte    4     event_type
+--   byte    5     num_samples
+--   bytes 6-7     reserved
+--   bytes 8-15    event time: TAI seconds, then quarter-nanoseconds
+--   bytes 16-23   tel_event_id: this packet's PacketCount value, zero-extended to
+--                 64 bits. The merge key; increases by exactly 1 per packet sent
+--                 (a dropped trigger, Section below, does not consume a value).
+--   bytes 24-121  pedestal_feb: the Pedestal register, repeated for all 49 channels
+--   bytes 122-170 pixel_status_feb: the PixelStatus register, repeated for all 49
+--                 channels
+--   bytes 171-175 reserved (padding to a 16-byte boundary)
+--   bytes 176-    49 x num_samples 12-bit samples, channel-major, packed MSB
+--                 first, zero-padded to a multiple of 32 bits
+--   last 4        CRC-32 (IEEE 802.3, as zlib) of every byte before it
+--
+-- pedestal_feb and pixel_status_feb are each one host-set value, not a real
+-- per-channel computation: the ICD itself still leaves their per-channel meaning
+-- open (averaging window and u12.4 format for the former, bit layout for the
+-- latter). A single replicated register is enough to exercise the field on the
+-- wire; widen it to one register per channel if per-channel testing is needed.
 --
 -- Sample i of a packet (i = channel * num_samples + sample) is
 -- (i + offset) mod 4096, offset being 0 or the trigger count, so a receiver
@@ -65,7 +81,6 @@ end FebPacketGen;
 
 architecture rtl of FebPacketGen is
 
-   constant PACKET_TYPE_C    : slv(7 downto 0)  := x"01";
    constant FORMAT_VERSION_C : slv(7 downto 0)  := x"01";
    constant QNS_PER_SEC_C    : slv(31 downto 0) := x"EE6B2800";  -- 4e9
    constant CRC_POLY_C       : slv(31 downto 0) := x"EDB88320";  -- 0x04C11DB7 reflected
@@ -112,11 +127,52 @@ architecture rtl of FebPacketGen is
       return ret;
    end function;
 
+   -- One 8-byte beat of the 176-byte header (offsets 0-175, lane 0 first on the wire).
+   -- pedestal_feb and pixel_status_feb are each one value tiled across their range, so
+   -- beats 3-20 are just that value repeated; only beat 15 (where the two fields meet)
+   -- and beat 21 (where the reserved pad begins) mix two values in one beat.
+   function headerBeatWord (
+      beat           : natural range 0 to 21;
+      pktHeader      : slv(31 downto 0);  -- tel_id, board_id, trigger_type, event_type
+      pktSamples     : slv(7 downto 0);
+      pktSec         : slv(31 downto 0);
+      pktQns         : slv(31 downto 0);
+      pktEventId     : slv(63 downto 0);
+      pktPedestal    : slv(15 downto 0);
+      pktPixelStatus : slv(7 downto 0)) return slv is
+      variable w : slv(63 downto 0);
+   begin
+      case beat is
+         when 0 =>
+            w(7 downto 0)   := FORMAT_VERSION_C;
+            w(15 downto 8)  := pktHeader(7 downto 0);    -- tel_id
+            w(23 downto 16) := pktHeader(15 downto 8);   -- board_id
+            w(31 downto 24) := pktHeader(23 downto 16);  -- trigger_type
+            w(39 downto 32) := pktHeader(31 downto 24);  -- event_type
+            w(47 downto 40) := pktSamples;
+            w(63 downto 48) := (others => '0');          -- reserved
+         when 1 =>
+            w := toLanes(pktSec & pktQns);
+         when 2 =>
+            w := toLanes(pktEventId);
+         when 3 to 14 =>
+            w := toLanes(pktPedestal & pktPedestal & pktPedestal & pktPedestal);
+         when 15 =>
+            w := toLanes(pktPedestal & pktPixelStatus & pktPixelStatus & pktPixelStatus
+                          & pktPixelStatus & pktPixelStatus & pktPixelStatus);
+         when 16 to 20 =>
+            w := toLanes(pktPixelStatus & pktPixelStatus & pktPixelStatus & pktPixelStatus
+                          & pktPixelStatus & pktPixelStatus & pktPixelStatus & pktPixelStatus);
+         when others =>  -- beat 21: 3 bytes of pixel_status_feb, then the reserved pad
+            w := toLanes(pktPixelStatus & pktPixelStatus & pktPixelStatus
+                          & x"00" & x"00" & x"00" & x"00" & x"00");
+      end case;
+      return w;
+   end function;
+
    type StateType is (
       IDLE_S,
-      HDR0_S,
-      HDR1_S,
-      HDR2_S,
+      HDR_S,
       PAYLOAD_S,
       CRC_S);
 
@@ -128,8 +184,8 @@ architecture rtl of FebPacketGen is
       trigPeriod     : slv(31 downto 0);
       numSamples     : slv(7 downto 0);
       header         : slv(31 downto 0);  -- tel_id, board_id, trigger_type, event_type
-      pixelLo        : slv(31 downto 0);
-      pixelHi        : slv(31 downto 0);
+      pedestal       : slv(15 downto 0);
+      pixelStatus    : slv(7 downto 0);
       timeSetSec     : slv(31 downto 0);
       timeSetQns     : slv(31 downto 0);
       timeLoad       : sl;
@@ -150,7 +206,9 @@ architecture rtl of FebPacketGen is
       -- Packet being sent, latched at its trigger
       pktHeader      : slv(31 downto 0);
       pktSamples     : slv(7 downto 0);
-      pktPixel       : slv(63 downto 0);
+      pktEventId     : slv(63 downto 0);
+      pktPedestal    : slv(15 downto 0);
+      pktPixelStatus : slv(7 downto 0);
       pktSec         : slv(31 downto 0);
       pktQns         : slv(31 downto 0);
       pktTotal       : slv(15 downto 0);
@@ -159,7 +217,8 @@ architecture rtl of FebPacketGen is
       sentBytes      : slv(15 downto 0);  -- payload bytes sent so far
       sampleBase     : slv(15 downto 0);  -- index of the current group's first sample
       valueBase      : slv(11 downto 0);  -- and its value
-      beat           : natural range 0 to 2;  -- beat within the 16-sample group
+      beat           : natural range 0 to 2;   -- beat within the 16-sample group
+      hdrBeat        : natural range 0 to 21;  -- beat within the 176-byte header
       crc            : slv(31 downto 0);
       state          : StateType;
       txMaster       : AxiStreamMasterType;
@@ -174,8 +233,8 @@ architecture rtl of FebPacketGen is
       trigPeriod     => toSlv(3906, 32),  -- 40 kHz at 156.25 MHz
       numSamples     => toSlv(40, 8),
       header         => (others => '0'),
-      pixelLo        => (others => '0'),
-      pixelHi        => (others => '0'),
+      pedestal       => (others => '0'),
+      pixelStatus    => (others => '0'),
       timeSetSec     => (others => '0'),
       timeSetQns     => (others => '0'),
       timeLoad       => '0',
@@ -192,7 +251,9 @@ architecture rtl of FebPacketGen is
       dropCnt        => (others => '0'),
       pktHeader      => (others => '0'),
       pktSamples     => (others => '0'),
-      pktPixel       => (others => '0'),
+      pktEventId     => (others => '0'),
+      pktPedestal    => (others => '0'),
+      pktPixelStatus => (others => '0'),
       pktSec         => (others => '0'),
       pktQns         => (others => '0'),
       pktTotal       => (others => '0'),
@@ -202,6 +263,7 @@ architecture rtl of FebPacketGen is
       sampleBase     => (others => '0'),
       valueBase      => (others => '0'),
       beat           => 0,
+      hdrBeat        => 0,
       crc            => (others => '1'),
       state          => IDLE_S,
       txMaster       => axiStreamMasterInit(AXIS_CONFIG_G),
@@ -246,8 +308,8 @@ begin
       axiSlaveRegister (axilEp, x"004", 0, v.trigPeriod);
       axiSlaveRegister (axilEp, x"008", 0, v.numSamples);
       axiSlaveRegister (axilEp, x"00C", 0, v.header);
-      axiSlaveRegister (axilEp, x"010", 0, v.pixelLo);
-      axiSlaveRegister (axilEp, x"014", 0, v.pixelHi);
+      axiSlaveRegister (axilEp, x"010", 0, v.pedestal);
+      axiSlaveRegister (axilEp, x"014", 0, v.pixelStatus);
       axiSlaveRegister (axilEp, x"018", 0, v.timeSetSec);
       axiSlaveRegister (axilEp, x"01C", 0, v.timeSetQns);
       axiSlaveRegister (axilEp, x"020", 0, v.timeLoad);
@@ -259,7 +321,7 @@ begin
       axiSlaveRegisterR(axilEp, x"048", 0, r.dropCnt);
       axiSlaveRegisterR(axilEp, x"04C", 0, r.timeSec);
       axiSlaveRegisterR(axilEp, x"050", 0, r.timeQns);
-      axiSlaveRegisterR(axilEp, x"054", 0, r.payloadBytes + 28);  -- whole packet
+      axiSlaveRegisterR(axilEp, x"054", 0, r.payloadBytes + 180);  -- whole packet
       axiSlaveRegisterR(axilEp, x"058", 0, FORMAT_VERSION_C);
 
       axiSlaveDefault(axilEp, v.axilWriteSlave, v.axilReadSlave, AXI_RESP_DECERR_C);
@@ -316,23 +378,26 @@ begin
       if fire = '1' then
          v.trigCnt := r.trigCnt + 1;
          if r.state = IDLE_S then
-            v.pktHeader  := r.header;
-            v.pktSamples := toSlv(ns, 8);
-            v.pktPixel   := r.pixelHi & r.pixelLo;
-            v.pktSec     := r.timeSec;
-            v.pktQns     := r.timeQns;
-            v.pktTotal   := r.numTotal;
-            v.pktPayload := r.payloadBytes;
-            v.pktCorrupt := r.corruptCrc;
-            v.sentBytes  := (others => '0');
-            v.sampleBase := (others => '0');
-            v.valueBase  := (others => '0');
+            v.pktHeader      := r.header;
+            v.pktSamples     := toSlv(ns, 8);
+            v.pktEventId     := x"00000000" & r.pktCnt;  -- this run's PacketCount, before it ticks
+            v.pktPedestal    := r.pedestal;
+            v.pktPixelStatus := r.pixelStatus;
+            v.pktSec         := r.timeSec;
+            v.pktQns         := r.timeQns;
+            v.pktTotal       := r.numTotal;
+            v.pktPayload     := r.payloadBytes;
+            v.pktCorrupt     := r.corruptCrc;
+            v.sentBytes      := (others => '0');
+            v.sampleBase     := (others => '0');
+            v.valueBase      := (others => '0');
             if r.patternOffset = '1' then
                v.valueBase := r.trigCnt(11 downto 0);
             end if;
-            v.beat  := 0;
-            v.crc   := (others => '1');
-            v.state := HDR0_S;
+            v.beat    := 0;
+            v.hdrBeat := 0;
+            v.crc     := (others => '1');
+            v.state   := HDR_S;
          else
             v.dropCnt := r.dropCnt + 1;
          end if;
@@ -369,44 +434,23 @@ begin
          when IDLE_S =>
             null;  -- left by the trigger logic above
          ----------------------------------------------------------------------
-         when HDR0_S =>
+         when HDR_S =>
             if (v.txMaster.tValid = '0') then
-               d(7 downto 0)   := r.pktHeader(7 downto 0);    -- tel_id
-               d(15 downto 8)  := r.pktHeader(15 downto 8);   -- board_id
-               d(23 downto 16) := PACKET_TYPE_C;
-               d(31 downto 24) := r.pktHeader(23 downto 16);  -- trigger_type
-               d(39 downto 32) := r.pktHeader(31 downto 24);  -- event_type
-               d(47 downto 40) := r.pktSamples;
-               d(55 downto 48) := FORMAT_VERSION_C;
-               v.txMaster.tValid              := '1';
-               v.txMaster.tData(63 downto 0)  := d;
-               v.txMaster.tKeep               := (others => '0');
-               v.txMaster.tKeep(7 downto 0)   := x"FF";
-               ssiSetUserSof(AXIS_CONFIG_G, v.txMaster, '1');
-               v.crc   := crc32Update(r.crc, d, 8);
-               v.state := HDR1_S;
-            end if;
-         ----------------------------------------------------------------------
-         when HDR1_S =>
-            if (v.txMaster.tValid = '0') then
-               d                              := toLanes(r.pktSec & r.pktQns);
-               v.txMaster.tValid              := '1';
-               v.txMaster.tData(63 downto 0)  := d;
-               v.txMaster.tKeep               := (others => '0');
-               v.txMaster.tKeep(7 downto 0)   := x"FF";
-               v.crc   := crc32Update(r.crc, d, 8);
-               v.state := HDR2_S;
-            end if;
-         ----------------------------------------------------------------------
-         when HDR2_S =>
-            if (v.txMaster.tValid = '0') then
-               d                              := toLanes(r.pktPixel);
-               v.txMaster.tValid              := '1';
-               v.txMaster.tData(63 downto 0)  := d;
-               v.txMaster.tKeep               := (others => '0');
-               v.txMaster.tKeep(7 downto 0)   := x"FF";
-               v.crc   := crc32Update(r.crc, d, 8);
-               v.state := PAYLOAD_S;
+               d := headerBeatWord(r.hdrBeat, r.pktHeader, r.pktSamples, r.pktSec, r.pktQns,
+                                    r.pktEventId, r.pktPedestal, r.pktPixelStatus);
+               v.txMaster.tValid             := '1';
+               v.txMaster.tData(63 downto 0) := d;
+               v.txMaster.tKeep              := (others => '0');
+               v.txMaster.tKeep(7 downto 0)  := x"FF";
+               if r.hdrBeat = 0 then
+                  ssiSetUserSof(AXIS_CONFIG_G, v.txMaster, '1');
+               end if;
+               v.crc := crc32Update(r.crc, d, 8);
+               if r.hdrBeat = 21 then
+                  v.state := PAYLOAD_S;
+               else
+                  v.hdrBeat := r.hdrBeat + 1;
+               end if;
             end if;
          ----------------------------------------------------------------------
          when PAYLOAD_S =>

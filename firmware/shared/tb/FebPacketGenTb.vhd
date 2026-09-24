@@ -214,8 +214,8 @@ begin
       axiWr(x"0000001C", x"EE6B00F0");  -- TimeSetQns = 4e9 - 10000
       axiWr(x"00000020", x"00000001");  -- TimeLoad
       axiWr(x"0000000C", x"44332211");  -- tel 0x11, board 0x22, trigger 0x33, event 0x44
-      axiWr(x"00000010", x"89ABCDEF");  -- pixel_status_feb low
-      axiWr(x"00000014", x"00012345");  -- pixel_status_feb high
+      axiWr(x"00000010", x"00001234");  -- Pedestal
+      axiWr(x"00000014", x"00000056");  -- PixelStatus
 
       softPacket(40, "offset=0 corrupt=0");
       softPacket(41, "offset=0 corrupt=0");

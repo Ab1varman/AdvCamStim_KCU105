@@ -47,8 +47,13 @@ class FebPacketGen(pr.Device):
         for name, bit in (('TelId', 0), ('BoardId', 8), ('TriggerType', 16), ('EventType', 24)):
             self.add(pr.RemoteVariable(name=name, offset=0x00C, bitSize=8, bitOffset=bit, mode='RW'))
         self.add(pr.RemoteVariable(
-            name='PixelStatus', offset=0x010, bitSize=64, mode='RW',
-            description='pixel_status_feb: bit i set = channel i disabled'))
+            name='Pedestal', offset=0x010, bitSize=16, mode='RW', disp='{:d}',
+            description='pedestal_feb: one value, repeated for every channel '
+                        '(averaging window and u12.4 format still TBC in the ICD)'))
+        self.add(pr.RemoteVariable(
+            name='PixelStatus', offset=0x014, bitSize=8, mode='RW',
+            description='pixel_status_feb: one value, repeated for every channel '
+                        '(bit layout still TBC in the ICD)'))
         self.add(pr.RemoteVariable(name='TimeSetSec', offset=0x018, bitSize=32, mode='RW'))
         self.add(pr.RemoteVariable(name='TimeSetQns', offset=0x01C, bitSize=32, mode='RW'))
         self.add(pr.RemoteCommand(
@@ -61,7 +66,7 @@ class FebPacketGen(pr.Device):
 
         for name, off, desc in (
                 ('TrigCount', 0x040, 'Triggers, sent or dropped'),
-                ('PacketCount', 0x044, 'Packets sent'),
+                ('PacketCount', 0x044, 'Packets sent; also the next packet\'s tel_event_id'),
                 ('DropCount', 0x048, 'Triggers dropped: a packet was still going out'),
                 ('TimeSec', 0x04C, 'Event-time counter, TAI seconds'),
                 ('TimeQns', 0x050, 'Event-time counter, quarter-nanoseconds'),

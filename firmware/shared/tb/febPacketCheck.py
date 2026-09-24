@@ -8,7 +8,7 @@
 # copied, modified, propagated, or distributed except according to the terms
 # contained in the LICENSE.txt file.
 #-----------------------------------------------------------------------------
-"""Check FebPacketGenTb output against the FEB ICD packet model, byte for byte."""
+"""Check FebPacketGenTb output against the FEB ICD v0.3 packet model, byte for byte."""
 import struct
 import sys
 import zlib
@@ -16,12 +16,15 @@ import zlib
 QNS_PER_SEC = 4_000_000_000
 
 # What the testbench programs
-TEL, BOARD, TRIGGER, EVENT, PIXEL = 0x11, 0x22, 0x33, 0x44, 0x00012345_89ABCDEF
+TEL, BOARD, TRIGGER, EVENT = 0x11, 0x22, 0x33, 0x44
+PEDESTAL, PIXEL_STATUS = 0x1234, 0x56
 TIME_SET_SEC = 0x6A000000
 
 
-def icd_packet(samples, sec, qns, offset):
-    """FEB ICD format 1, no-neighbours: header, packed 12-bit samples, CRC-32."""
+def icd_packet(samples, sec, qns, event_id, offset):
+    """FEB ICD v0.3 format 1, no-neighbours: header, pedestal_feb, pixel_status_feb,
+    packed 12-bit samples, CRC-32. pedestal_feb and pixel_status_feb are one value
+    repeated for every channel, matching what the generator writes."""
     n = 49 * samples
     payload_bytes = 4 * ((12 * n + 31) // 32)
     body, acc, nbits = bytearray(), 0, 0
@@ -35,13 +38,16 @@ def icd_packet(samples, sec, qns, offset):
     if nbits:
         body.append((acc << (8 - nbits)) & 0xFF)
     body += bytes(payload_bytes - len(body))
-    pkt = (bytes([TEL, BOARD, 0x01, TRIGGER, EVENT, samples, 0x01, 0x00])
-           + struct.pack('>IIQ', sec, qns, PIXEL) + body)
+    pkt = (bytes([0x01, TEL, BOARD, TRIGGER, EVENT, samples, 0x00, 0x00])
+           + struct.pack('>IIQ', sec, qns, event_id)
+           + struct.pack('>H', PEDESTAL) * 49
+           + bytes([PIXEL_STATUS]) * 49
+           + bytes(5) + body)
     return pkt + struct.pack('>I', zlib.crc32(pkt))
 
 
 def main(path):
-    cfg, regs, fails, count, last_t = {}, {}, 0, 0, None
+    cfg, regs, fails, count, last_t, last_id = {}, {}, 0, 0, None, -1
     for line in open(path):
         f = line.split()
         if not f:
@@ -59,8 +65,9 @@ def main(path):
         count += 1
         samples, corrupt = int(cfg['S']), cfg['corrupt'] == '1'
         sec, qns = struct.unpack_from('>II', pkt, 8)
-        offset = ((pkt[24] << 4) | (pkt[25] >> 4)) if cfg['offset'] == '1' else 0
-        want = icd_packet(samples, sec, qns, offset)
+        event_id = struct.unpack_from('>Q', pkt, 16)[0]
+        offset = ((pkt[176] << 4) | (pkt[177] >> 4)) if cfg['offset'] == '1' else 0
+        want = icd_packet(samples, sec, qns, event_id, offset)
         if corrupt:
             want = want[:-4] + struct.pack('>I', zlib.crc32(want[:-4]) ^ 0xFFFFFFFF)
 
@@ -79,10 +86,14 @@ def main(path):
         if last_t is not None and t <= last_t:
             problems.append('event time did not increase')
         last_t = t
+        if event_id != last_id + 1:
+            problems.append(f'tel_event_id {event_id}, expected {last_id + 1}')
+        last_id = event_id
 
         fails += bool(problems)
-        print(f'packet {count:2d}  S={samples:2d}  {len(pkt):4d} B  t={sec:#x}.{qns:010d}  '
-              f'offset={offset:4d}  {"bad CRC injected  " if corrupt else ""}'
+        print(f'packet {count:2d}  S={samples:2d}  {len(pkt):4d} B  id={event_id}  '
+              f't={sec:#x}.{qns:010d}  offset={offset:4d}  '
+              f'{"bad CRC injected  " if corrupt else ""}'
               f'{"OK" if not problems else "FAIL: " + "; ".join(problems)}')
 
     checks = [
@@ -90,7 +101,7 @@ def main(path):
         ('TrigCount = PacketCount + DropCount',
          regs.get('TrigCount') == regs.get('PacketCount', -1) + regs.get('DropCount', -1)),
         ('periodic triggers faster than the drain were dropped', regs.get('DropCount', 0) > 0),
-        ('PacketBytes = 2968 at 40 samples', regs.get('PacketBytes') == 2968),
+        ('PacketBytes = 3120 at 40 samples', regs.get('PacketBytes') == 3120),
         ('FormatVersion = 1', regs.get('FormatVersion') == 1),
         ('seconds rolled over', last_t is not None and last_t // QNS_PER_SEC == TIME_SET_SEC + 1),
     ]
