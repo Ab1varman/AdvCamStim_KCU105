@@ -7,7 +7,8 @@
 --
 -- Covers: packets whose CRC shares the last beat (S = 40, 1, 55) and whose CRC
 -- gets its own beat (S = 41, 16), a seconds rollover, the offset pattern, CRC
--- corruption, and periodic triggers faster than packets drain (drops).
+-- corruption, periodic triggers faster than packets drain (drops, which leave
+-- tel_event_id gaps), and a counter reset (tel_event_id restarts at 0).
 -------------------------------------------------------------------------------
 -- This file is part of 'Simple-10GbE-RUDP-KCU105-Example'.
 -- It is subject to the license terms in the LICENSE.txt file found in the
@@ -244,6 +245,12 @@ begin
       logReg("DropCount", x"00000048");
       logReg("PacketBytes", x"00000054");
       logReg("FormatVersion", x"00000058");
+
+      -- The start of a new run: counters and tel_event_id from 0
+      n := pktSeen;  -- the periodic triggers above sent packets of their own
+      axiWr(x"00000028", x"00000001");  -- CountReset
+      softPacket(40, "offset=0 corrupt=0 reset=1");
+      logReg("PacketCountAfterReset", x"00000044");
       log("DONE");
 
       simDone <= true;

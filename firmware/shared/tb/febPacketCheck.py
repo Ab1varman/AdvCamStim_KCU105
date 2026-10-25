@@ -48,6 +48,7 @@ def icd_packet(samples, sec, qns, event_id, offset):
 
 def main(path):
     cfg, regs, fails, count, last_t, last_id = {}, {}, 0, 0, None, -1
+    gaps, reset_ids = 0, []
     for line in open(path):
         f = line.split()
         if not f:
@@ -62,8 +63,10 @@ def main(path):
             continue
 
         pkt = bytes.fromhex(f[1])
-        count += 1
         samples, corrupt = int(cfg['S']), cfg['corrupt'] == '1'
+        after_reset = cfg.get('reset') == '1'
+        if not after_reset:
+            count += 1
         sec, qns = struct.unpack_from('>II', pkt, 8)
         event_id = struct.unpack_from('>Q', pkt, 16)[0]
         offset = ((pkt[176] << 4) | (pkt[177] >> 4)) if cfg['offset'] == '1' else 0
@@ -86,12 +89,20 @@ def main(path):
         if last_t is not None and t <= last_t:
             problems.append('event time did not increase')
         last_t = t
-        if event_id != last_id + 1:
-            problems.append(f'tel_event_id {event_id}, expected {last_id + 1}')
-        last_id = event_id
+        # A dropped trigger consumes its number, so ids increase by 1 plus the triggers
+        # dropped since the previous packet. Packets sent after CountReset restart at 0.
+        if after_reset:
+            reset_ids.append(event_id)
+        elif event_id <= last_id:
+            problems.append(f'tel_event_id {event_id} after {last_id}')
+        else:
+            gaps += event_id - last_id - 1
+            last_id = event_id
+        if cfg['offset'] == '1' and offset != event_id & 0xFFF:
+            problems.append(f'pattern offset {offset} is not tel_event_id mod 4096')
 
         fails += bool(problems)
-        print(f'packet {count:2d}  S={samples:2d}  {len(pkt):4d} B  id={event_id}  '
+        print(f'packet {count + len(reset_ids):2d}  S={samples:2d}  {len(pkt):4d} B  id={event_id}  '
               f't={sec:#x}.{qns:010d}  offset={offset:4d}  '
               f'{"bad CRC injected  " if corrupt else ""}'
               f'{"OK" if not problems else "FAIL: " + "; ".join(problems)}')
@@ -101,6 +112,10 @@ def main(path):
         ('TrigCount = PacketCount + DropCount',
          regs.get('TrigCount') == regs.get('PacketCount', -1) + regs.get('DropCount', -1)),
         ('periodic triggers faster than the drain were dropped', regs.get('DropCount', 0) > 0),
+        ('every dropped trigger left a tel_event_id gap',
+         gaps + (regs.get('TrigCount', 0) - 1 - last_id) == regs.get('DropCount')),
+        ('the first packet after CountReset is tel_event_id 0', reset_ids[:1] == [0]),
+        ('CountReset zeroed PacketCount', regs.get('PacketCountAfterReset') == len(reset_ids)),
         ('PacketBytes = 3120 at 40 samples', regs.get('PacketBytes') == 3120),
         ('FormatVersion = 1', regs.get('FormatVersion') == 1),
         ('seconds rolled over', last_t is not None and last_t // QNS_PER_SEC == TIME_SET_SEC + 1),

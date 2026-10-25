@@ -14,9 +14,10 @@
 --   byte    5     num_samples
 --   bytes 6-7     reserved
 --   bytes 8-15    event time: TAI seconds, then quarter-nanoseconds
---   bytes 16-23   tel_event_id: this packet's PacketCount value, zero-extended to
---                 64 bits. The merge key; increases by exactly 1 per packet sent
---                 (a dropped trigger, Section below, does not consume a value).
+--   bytes 16-23   tel_event_id: the number of this packet's trigger (TrigCount before
+--                 it counts that trigger), zero-extended to 64 bits. The merge key. A
+--                 dropped trigger (below) consumes its number, so the receiver sees the
+--                 gap a real FEB's lost trigger would leave.
 --   bytes 24-121  pedestal_feb: the Pedestal register, repeated for all 49 channels
 --   bytes 122-170 pixel_status_feb: the PixelStatus register, repeated for all 49
 --                 channels
@@ -380,7 +381,7 @@ begin
          if r.state = IDLE_S then
             v.pktHeader      := r.header;
             v.pktSamples     := toSlv(ns, 8);
-            v.pktEventId     := x"00000000" & r.pktCnt;  -- this run's PacketCount, before it ticks
+            v.pktEventId     := x"00000000" & r.trigCnt;  -- this trigger's number
             v.pktPedestal    := r.pedestal;
             v.pktPixelStatus := r.pixelStatus;
             v.pktSec         := r.timeSec;
