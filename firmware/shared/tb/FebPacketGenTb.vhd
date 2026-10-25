@@ -195,12 +195,12 @@ begin
 
       procedure softPacket (samples : in natural; cfg : in string) is
       begin
-         axiWr(x"00000008", conv_std_logic_vector(samples, 32));  -- NumSamples
+         axiWr(x"00000010", conv_std_logic_vector(samples, 32));  -- NumSamples
          for i in 0 to 3 loop
             wait until rising_edge(clk);
          end loop;
          log("CFG S=" & integer'image(samples) & " " & cfg);
-         axiWr(x"00000024", x"00000001");  -- SoftTrig
+         axiWr(x"00000108", x"00000001");  -- SoftTrig
          n := n + 1;
          waitPackets(n);
       end procedure;
@@ -211,12 +211,14 @@ begin
       wait for 100 ns;
 
       -- Start 10 us before a seconds rollover
-      axiWr(x"00000018", x"6A000000");  -- TimeSetSec
-      axiWr(x"0000001C", x"EE6B00F0");  -- TimeSetQns = 4e9 - 10000
-      axiWr(x"00000020", x"00000001");  -- TimeLoad
-      axiWr(x"0000000C", x"44332211");  -- tel 0x11, board 0x22, trigger 0x33, event 0x44
-      axiWr(x"00000010", x"00001234");  -- Pedestal
-      axiWr(x"00000014", x"00000056");  -- PixelStatus
+      axiWr(x"00000118", x"6A000000");  -- TimeSetSec
+      axiWr(x"0000011C", x"EE6B00F0");  -- TimeSetQns = 4e9 - 10000
+      axiWr(x"00000120", x"00000001");  -- TimeLoad
+      axiWr(x"00000008", x"00000011");  -- TelId
+      axiWr(x"0000000C", x"00000022");  -- BoardId
+      axiWr(x"0000010C", x"00004433");  -- TriggerType 0x33, EventType 0x44
+      axiWr(x"00000110", x"00001234");  -- Pedestal
+      axiWr(x"00000114", x"00000056");  -- PixelStatus
 
       softPacket(40, "offset=0 corrupt=0");
       softPacket(41, "offset=0 corrupt=0");
@@ -224,31 +226,32 @@ begin
       softPacket(55, "offset=0 corrupt=0");
       softPacket(16, "offset=0 corrupt=0");
 
-      axiWr(x"00000000", x"00000002");  -- PatternOffset
+      axiWr(x"00000100", x"00000002");  -- PatternOffset
       softPacket(40, "offset=1 corrupt=0");
       softPacket(40, "offset=1 corrupt=0");
 
-      axiWr(x"00000000", x"00000004");  -- CorruptCrc
+      axiWr(x"00000100", x"00000004");  -- CorruptCrc
       softPacket(40, "offset=0 corrupt=1");
-      axiWr(x"00000000", x"00000000");
+      axiWr(x"00000100", x"00000000");
 
       -- Periodic triggers every 300 cycles, faster than a 40-sample packet drains
-      axiWr(x"00000004", conv_std_logic_vector(300, 32));  -- TrigPeriod
+      axiWr(x"00000104", conv_std_logic_vector(300, 32));  -- TrigPeriod
       log("CFG S=40 offset=0 corrupt=0 periodic");
-      axiWr(x"00000000", x"00000001");  -- Enable
+      axiWr(x"00000100", x"00000001");  -- TrigEnable
       wait for 20 us;
-      axiWr(x"00000000", x"00000000");
+      axiWr(x"00000100", x"00000000");
       wait for 10 us;
 
       logReg("TrigCount", x"00000040");
       logReg("PacketCount", x"00000044");
       logReg("DropCount", x"00000048");
-      logReg("PacketBytes", x"00000054");
-      logReg("FormatVersion", x"00000058");
+      logReg("PacketBytes", x"00000148");
+      logReg("FormatVersion", x"00000004");
+      logReg("MapVersion", x"00000000");
 
       -- The start of a new run: counters and tel_event_id from 0
       n := pktSeen;  -- the periodic triggers above sent packets of their own
-      axiWr(x"00000028", x"00000001");  -- CountReset
+      axiWr(x"00000018", x"00000001");  -- CountReset
       softPacket(40, "offset=0 corrupt=0 reset=1");
       logReg("PacketCountAfterReset", x"00000044");
       log("DONE");

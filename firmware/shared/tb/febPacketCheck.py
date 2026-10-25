@@ -118,6 +118,7 @@ def main(path):
         ('CountReset zeroed PacketCount', regs.get('PacketCountAfterReset') == len(reset_ids)),
         ('PacketBytes = 3120 at 40 samples', regs.get('PacketBytes') == 3120),
         ('FormatVersion = 1', regs.get('FormatVersion') == 1),
+        ('MapVersion = 1', regs.get('MapVersion') == 1),
         ('seconds rolled over', last_t is not None and last_t // QNS_PER_SEC == TIME_SET_SEC + 1),
     ]
     for name, ok in checks:

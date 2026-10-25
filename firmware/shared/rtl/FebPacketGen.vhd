@@ -37,6 +37,36 @@
 -- can check every sample. Triggers come from a period register or a software
 -- strobe; a trigger arriving while a packet is still going out is counted as
 -- dropped, as a FEB with a full buffer would.
+--
+-- Registers, by byte offset. 0x000-0x0FF is what the FEB ICD asks of a FEB, and
+-- is meant as a starting point for its register map. 0x100-0x1FF stands in for
+-- what a real FEB gets from elsewhere -- triggers from the CTP, time from White
+-- Rabbit, pedestals and pixel status from its front-end -- and exists only in
+-- this emulator. Sending is started and stopped by the RoCEv2 engine's
+-- DispatchEnable, not here. MAP_VERSION_C changes whenever this layout does.
+--
+--   0x000  RO  MapVersion
+--   0x004  RO  FormatVersion   format_version of the packets sent
+--   0x008  RW  TelId           tel_id, header byte 1
+--   0x00C  RW  BoardId         board_id, header byte 2
+--   0x010  RW  NumSamples      num_samples, 1-255 (0 sends 1)
+--   0x018  W1  CountReset      zero the counters, so tel_event_id restarts at 0
+--   0x040  RO  TrigCount       triggers received, sent or dropped
+--   0x044  RO  PacketCount     packets sent
+--   0x048  RO  DropCount       triggers dropped: a packet was still going out
+--
+--   0x100  RW  TrigEnable (bit 0), PatternOffset (bit 1), CorruptCrc (bit 2)
+--   0x104  RW  TrigPeriod      clock cycles between periodic triggers
+--   0x108  W1  SoftTrig        one trigger
+--   0x10C  RW  TriggerType (bits 7-0), EventType (bits 15-8), for the header
+--   0x110  RW  Pedestal        pedestal_feb, for every channel
+--   0x114  RW  PixelStatus     pixel_status_feb, for every channel
+--   0x118  RW  TimeSetSec      \
+--   0x11C  RW  TimeSetQns       > TimeLoad copies them into the event-time counter
+--   0x120  W1  TimeLoad        /
+--   0x140  RO  TimeSec         event-time counter, TAI seconds
+--   0x144  RO  TimeQns         and quarter-nanoseconds
+--   0x148  RO  PacketBytes     bytes per packet at NumSamples, CRC included
 -------------------------------------------------------------------------------
 -- This file is part of 'Simple-10GbE-RUDP-KCU105-Example'.
 -- It is subject to the license terms in the LICENSE.txt file found in the
@@ -82,6 +112,7 @@ end FebPacketGen;
 
 architecture rtl of FebPacketGen is
 
+   constant MAP_VERSION_C    : slv(31 downto 0) := x"00000001";
    constant FORMAT_VERSION_C : slv(7 downto 0)  := x"01";
    constant QNS_PER_SEC_C    : slv(31 downto 0) := x"EE6B2800";  -- 4e9
    constant CRC_POLY_C       : slv(31 downto 0) := x"EDB88320";  -- 0x04C11DB7 reflected
@@ -178,13 +209,17 @@ architecture rtl of FebPacketGen is
       CRC_S);
 
    type RegType is record
-      -- Configuration
-      enable         : sl;
+      -- Run parameters (ICD)
+      telId          : slv(7 downto 0);
+      boardId        : slv(7 downto 0);
+      numSamples     : slv(7 downto 0);
+      -- Emulator controls
+      trigEnable     : sl;
       patternOffset  : sl;
       corruptCrc     : sl;
       trigPeriod     : slv(31 downto 0);
-      numSamples     : slv(7 downto 0);
-      header         : slv(31 downto 0);  -- tel_id, board_id, trigger_type, event_type
+      triggerType    : slv(7 downto 0);
+      eventType      : slv(7 downto 0);
       pedestal       : slv(15 downto 0);
       pixelStatus    : slv(7 downto 0);
       timeSetSec     : slv(31 downto 0);
@@ -228,12 +263,15 @@ architecture rtl of FebPacketGen is
    end record RegType;
 
    constant REG_INIT_C : RegType := (
-      enable         => '0',
+      telId          => (others => '0'),
+      boardId        => (others => '0'),
+      numSamples     => toSlv(40, 8),
+      trigEnable     => '0',
       patternOffset  => '0',
       corruptCrc     => '0',
       trigPeriod     => toSlv(3906, 32),  -- 40 kHz at 156.25 MHz
-      numSamples     => toSlv(40, 8),
-      header         => (others => '0'),
+      triggerType    => (others => '0'),
+      eventType      => (others => '0'),
       pedestal       => (others => '0'),
       pixelStatus    => (others => '0'),
       timeSetSec     => (others => '0'),
@@ -303,27 +341,33 @@ begin
 
       axiSlaveWaitTxn(axilEp, axilWriteMaster, axilReadMaster, v.axilWriteSlave, v.axilReadSlave);
 
-      axiSlaveRegister (axilEp, x"000", 0, v.enable);
-      axiSlaveRegister (axilEp, x"000", 1, v.patternOffset);
-      axiSlaveRegister (axilEp, x"000", 2, v.corruptCrc);
-      axiSlaveRegister (axilEp, x"004", 0, v.trigPeriod);
-      axiSlaveRegister (axilEp, x"008", 0, v.numSamples);
-      axiSlaveRegister (axilEp, x"00C", 0, v.header);
-      axiSlaveRegister (axilEp, x"010", 0, v.pedestal);
-      axiSlaveRegister (axilEp, x"014", 0, v.pixelStatus);
-      axiSlaveRegister (axilEp, x"018", 0, v.timeSetSec);
-      axiSlaveRegister (axilEp, x"01C", 0, v.timeSetQns);
-      axiSlaveRegister (axilEp, x"020", 0, v.timeLoad);
-      axiSlaveRegister (axilEp, x"024", 0, v.softTrig);
-      axiSlaveRegister (axilEp, x"028", 0, v.cntRst);
-
+      -- What the ICD asks of a FEB
+      axiSlaveRegisterR(axilEp, x"000", 0, MAP_VERSION_C);
+      axiSlaveRegisterR(axilEp, x"004", 0, FORMAT_VERSION_C);
+      axiSlaveRegister (axilEp, x"008", 0, v.telId);
+      axiSlaveRegister (axilEp, x"00C", 0, v.boardId);
+      axiSlaveRegister (axilEp, x"010", 0, v.numSamples);
+      axiSlaveRegister (axilEp, x"018", 0, v.cntRst);
       axiSlaveRegisterR(axilEp, x"040", 0, r.trigCnt);
       axiSlaveRegisterR(axilEp, x"044", 0, r.pktCnt);
       axiSlaveRegisterR(axilEp, x"048", 0, r.dropCnt);
-      axiSlaveRegisterR(axilEp, x"04C", 0, r.timeSec);
-      axiSlaveRegisterR(axilEp, x"050", 0, r.timeQns);
-      axiSlaveRegisterR(axilEp, x"054", 0, r.payloadBytes + 180);  -- whole packet
-      axiSlaveRegisterR(axilEp, x"058", 0, FORMAT_VERSION_C);
+
+      -- Emulator only
+      axiSlaveRegister (axilEp, x"100", 0, v.trigEnable);
+      axiSlaveRegister (axilEp, x"100", 1, v.patternOffset);
+      axiSlaveRegister (axilEp, x"100", 2, v.corruptCrc);
+      axiSlaveRegister (axilEp, x"104", 0, v.trigPeriod);
+      axiSlaveRegister (axilEp, x"108", 0, v.softTrig);
+      axiSlaveRegister (axilEp, x"10C", 0, v.triggerType);
+      axiSlaveRegister (axilEp, x"10C", 8, v.eventType);
+      axiSlaveRegister (axilEp, x"110", 0, v.pedestal);
+      axiSlaveRegister (axilEp, x"114", 0, v.pixelStatus);
+      axiSlaveRegister (axilEp, x"118", 0, v.timeSetSec);
+      axiSlaveRegister (axilEp, x"11C", 0, v.timeSetQns);
+      axiSlaveRegister (axilEp, x"120", 0, v.timeLoad);
+      axiSlaveRegisterR(axilEp, x"140", 0, r.timeSec);
+      axiSlaveRegisterR(axilEp, x"144", 0, r.timeQns);
+      axiSlaveRegisterR(axilEp, x"148", 0, r.payloadBytes + 180);  -- whole packet
 
       axiSlaveDefault(axilEp, v.axilWriteSlave, v.axilReadSlave, AXI_RESP_DECERR_C);
 
@@ -365,7 +409,7 @@ begin
       ----------------------------------------------------------------------
 
       fire := r.softTrig;
-      if (r.enable = '1') and (r.trigPeriod /= 0) then
+      if (r.trigEnable = '1') and (r.trigPeriod /= 0) then
          if r.trigTimer >= r.trigPeriod - 1 then
             v.trigTimer := (others => '0');
             fire        := '1';
@@ -379,7 +423,7 @@ begin
       if fire = '1' then
          v.trigCnt := r.trigCnt + 1;
          if r.state = IDLE_S then
-            v.pktHeader      := r.header;
+            v.pktHeader      := r.eventType & r.triggerType & r.boardId & r.telId;
             v.pktSamples     := toSlv(ns, 8);
             v.pktEventId     := x"00000000" & r.trigCnt;  -- this trigger's number
             v.pktPedestal    := r.pedestal;
