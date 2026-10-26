@@ -143,6 +143,30 @@ pixel status, CRC, event time, `tel_event_id` -- and the samples of every 20th, 
 generator's and the engine's counters against what arrived: every dropped trigger must leave a
 `tel_event_id` gap. It needs rogue 6.15 or newer and an mlx5 NIC on the board's subnet.
 
+## Rate
+
+`febEmulatorRate.py` measures, for each `num_samples`, the packet rate with the generator
+triggered every clock cycle and the highest periodic trigger rate it sustains without dropping a
+trigger. On our rig, the board on its 10 GbE SFP+ link and a ConnectX NIC on the host:
+
+| `num_samples` | packet | highest drop-free trigger rate | on the wire | limited by |
+| ---: | ---: | ---: | ---: | --- |
+| 1 | 256 B | 682 kHz | 1.84 Gb/s | host receiver |
+| 8 | 768 B | 659 kHz | 4.48 Gb/s | host receiver |
+| 16 | 1,356 B | 657 kHz | 7.55 Gb/s | host receiver |
+| 24 | 1,944 B | 610 kHz | 9.89 Gb/s | link |
+| 32 | 2,532 B | 474 kHz | 9.90 Gb/s | link |
+| 40 | 3,120 B | 388 kHz | 9.93 Gb/s | link |
+| 48 | 3,708 B | 328 kHz | 9.93 Gb/s | link |
+| 53 | 4,076 B | 299 kHz | 9.94 Gb/s | link |
+
+From 24 samples up the board fills the link: 99% of 10 Gb/s on the wire, and a drop-free
+trigger rate within 1% of the link's ceiling -- 388 kHz at 40 samples, almost ten times the
+40 kHz design point. Below that, the measurement stops at about 660-690 k packets/s because
+rogue's receive thread does: the host runs out of receive buffers, answers "receiver not
+ready", and the engine sends again, 1.3 million times a second at 256 bytes. The board's own
+limit for small packets is above that and is not measured here.
+
 ## Building and programming
 
 Vivado 2024.2, with the submodules checked out in full (ruckus reads their version tags) and
