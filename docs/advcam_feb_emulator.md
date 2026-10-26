@@ -128,6 +128,21 @@ To stop, `DispatchEnable` off, then `Engine.teardownConnection()` and `SoftReset
   channels here; a real FEB computes them per channel.
 - **Counter width.** 32-bit counters, against a 64-bit `tel_event_id`.
 
+## Checking a board
+
+```bash
+cd software/scripts
+python febEmulatorTest.py --ip 192.168.2.10 --roceDevice mlx5_0
+```
+
+`febEmulatorTest.py` brings the board up as SLAC's `rocev2PrbsTest.py` does, then has the
+generator send at 10 kHz and 40 kHz, with the offset pattern, with corrupted CRCs, faster than
+the host can take (200 kHz), and at the largest packet that fits a SEND and the first one that
+does not. It checks every packet received against the ICD model -- size, header, pedestal and
+pixel status, CRC, event time, `tel_event_id` -- and the samples of every 20th, and checks the
+generator's and the engine's counters against what arrived: every dropped trigger must leave a
+`tel_event_id` gap. It needs rogue 6.15 or newer and an mlx5 NIC on the board's subnet.
+
 ## Building and programming
 
 Vivado 2024.2, with the submodules checked out in full (ruckus reads their version tags) and
